@@ -18,7 +18,7 @@ from telegram.ext import (
 # ===========================================================
 
 # 👉 PASTE YOUR TELEGRAM BOT TOKEN HERE (ONLY EDIT THIS LINE)
-BOT_TOKEN = "8374066571:AAEZ8zYgvpwyQgkeQdVEwQdX3KJAwtIKDR4"
+BOT_TOKEN = "PASTE_YOUR_TELEGRAM_BOT_TOKEN_HERE"
 
 # Your Solana wallet (you gave me this)
 SOL_WALLET = "AjQA16fxwyavZP4WZWsQXSGjesXKWXxcZ7yuDdXNy8Wi"
@@ -205,3 +205,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
