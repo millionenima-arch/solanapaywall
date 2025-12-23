@@ -22,10 +22,9 @@ HELIUS_SECRET = os.environ.get("HELIUS_SECRET", "")
 # Your receiving SOL wallet (paywall address)
 SOL_WALLET = "AjQA16fxwyavZP4WZWsQXSGjesXKWXxcZ7yuDdXNy8Wi"
 
-# VIP PRIVATE GROUP ID (the real paywalled group)
+# VIP PRIVATE GROUP ID (paywalled group)
 GROUP_ID = -1002871650386
 
-# Prices
 PLANS = {
     "week":  {"price_sol": 0.5,  "days": 7},
     "month": {"price_sol": 1.0,  "days": 30},
@@ -35,10 +34,12 @@ PLANS = {
 
 DB = "subs.db"
 LAMPORTS_PER_SOL = 1_000_000_000
-# 0.05 SOL tolerance
-TOLERANCE_LAMPORTS = int(0.05 * LAMPORTS_PER_SOL)
+TOLERANCE_LAMPORTS = int(0.05 * LAMPORTS_PER_SOL)  # 0.05 SOL
 
 api = FastAPI()
+
+# Build Telegram application (no polling)
+bot_app = ApplicationBuilder().token(BOT_TOKEN).build()
 
 # ===========================================================
 # DB HELPERS
@@ -58,7 +59,6 @@ def init_db():
     )
     """)
 
-    # one pending payment per user
     c.execute("""
     CREATE TABLE IF NOT EXISTS pending (
         user_id          INTEGER PRIMARY KEY,
@@ -134,36 +134,35 @@ def complete_payment_from_transfer(from_wallet: str, amount_lamports: int):
     if not row:
         conn.close()
         print(f"[PAY] no pending payment for wallet {from_wallet}")
-    else:
-        user_id, plan, expected = row
-        print(f"[PAY] candidate match user={user_id} plan={plan} expected={expected} got={amount_lamports}")
+        return None, None
 
-        # accept if sent >= expected - 0.05 SOL
-        if amount_lamports + TOLERANCE_LAMPORTS >= expected:
-            # delete pending
-            c.execute("DELETE FROM pending WHERE user_id = ?", (user_id,))
+    user_id, plan, expected = row
+    print(f"[PAY] candidate match user={user_id} plan={plan} expected={expected} got={amount_lamports}")
 
-            days = PLANS[plan]["days"]
-            if days is None:
-                expires = None
-            else:
-                expires = int(time.time()) + days * 86400
+    # accept if sent >= expected - 0.05 SOL
+    if amount_lamports + TOLERANCE_LAMPORTS >= expected:
+        c.execute("DELETE FROM pending WHERE user_id = ?", (user_id,))
 
-            c.execute("""
-            UPDATE subs
-            SET plan = ?, expires_at = ?
-            WHERE user_id = ?
-            """, (plan, expires, user_id))
-
-            conn.commit()
-            conn.close()
-            print(f"[PAY] ACCEPTED user={user_id} plan={plan} expires={expires}")
-            return user_id, expires
+        days = PLANS[plan]["days"]
+        if days is None:
+            expires = None
         else:
-            print(f"[PAY] REJECTED underpay. expected>={expected - TOLERANCE_LAMPORTS}, got={amount_lamports}")
-            conn.close()
+            expires = int(time.time()) + days * 86400
 
-    return None, None
+        c.execute("""
+        UPDATE subs
+        SET plan = ?, expires_at = ?
+        WHERE user_id = ?
+        """, (plan, expires, user_id))
+
+        conn.commit()
+        conn.close()
+        print(f"[PAY] ACCEPTED user={user_id} plan={plan} expires={expires}")
+        return user_id, expires
+    else:
+        print(f"[PAY] REJECTED underpay. expected>={expected - TOLERANCE_LAMPORTS}, got={amount_lamports}")
+        conn.close()
+        return None, None
 
 
 def get_expired():
@@ -180,11 +179,8 @@ def get_expired():
 
 
 # ===========================================================
-# TELEGRAM BOT
+# TELEGRAM HANDLERS
 # ===========================================================
-
-bot_app = ApplicationBuilder().token(BOT_TOKEN).build()
-
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -314,12 +310,23 @@ if bot_app.job_queue is not None:
 
 
 # ===========================================================
+# FASTAPI: TELEGRAM WEBHOOK
+# ===========================================================
+
+@api.post("/telegram-webhook")
+async def telegram_webhook(request: Request):
+    data = await request.json()
+    update = Update.de_json(data, bot_app.bot)
+    await bot_app.process_update(update)
+    return {"ok": True}
+
+
+# ===========================================================
 # FASTAPI: HELIUS WEBHOOK
 # ===========================================================
 
 @api.post("/helius-webhook")
 async def helius(request: Request):
-    # header auth
     if HELIUS_SECRET:
         if request.headers.get("x-webhook-secret") != HELIUS_SECRET:
             print("[WEBHOOK] invalid secret header")
@@ -338,7 +345,6 @@ async def helius(request: Request):
 
             if not to_acc or not from_acc:
                 continue
-
             if to_acc.lower() != SOL_WALLET.lower():
                 continue
 
@@ -353,7 +359,6 @@ async def helius(request: Request):
             if not user_id:
                 continue
 
-            # create invite and DM user
             try:
                 link = await bot_app.bot.create_chat_invite_link(GROUP_ID)
                 await bot_app.bot.send_message(
@@ -372,21 +377,30 @@ async def helius(request: Request):
 
 
 # ===========================================================
+# FASTAPI LIFECYCLE: START/STOP TELEGRAM APP
+# ===========================================================
+
+@api.on_event("startup")
+async def on_startup():
+    init_db()
+    await bot_app.initialize()
+    await bot_app.start()
+    print("[APP] Telegram application started (webhook mode)")
+
+
+@api.on_event("shutdown")
+async def on_shutdown():
+    await bot_app.stop()
+    await bot_app.shutdown()
+    print("[APP] Telegram application stopped")
+
+
+# ===========================================================
 # ENTRYPOINT
 # ===========================================================
 
 def main():
-    init_db()
-
-    import threading
-
-    def run_api():
-        uvicorn.run(api, host="0.0.0.0", port=8000)
-
-    t = threading.Thread(target=run_api, daemon=True)
-    t.start()
-
-    bot_app.run_polling()
+    uvicorn.run(api, host="0.0.0.0", port=8000)
 
 
 if __name__ == "__main__":
