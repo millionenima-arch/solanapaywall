@@ -5,51 +5,57 @@ from fastapi import FastAPI, Request
 import uvicorn
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, CallbackQueryHandler,
-    ContextTypes
+    ApplicationBuilder,
+    CommandHandler,
+    CallbackQueryHandler,
+    ContextTypes,
 )
 
 # ===========================================================
 # 🔧 CONFIG
 # ===========================================================
 
+# Read tokens from environment variables (set these in Render)
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN env var is not set")
 
+# Optional: if set, Helius must send header x-webhook-secret with this value
 HELIUS_SECRET = os.environ.get("HELIUS_SECRET", "")
 
 # Your receiving SOL wallet (paywall address)
 SOL_WALLET = "AjQA16fxwyavZP4WZWsQXSGjesXKWXxcZ7yuDdXNy8Wi"
 
 # VIP PRIVATE GROUP ID (paywalled group)
-GROUP_ID = -1002871650386
+GROUP_ID = -1002871650386  # replace if your group changes
 
+# Subscription plans
 PLANS = {
-    "week":  {"price_sol": 0.5,  "days": 7},
-    "month": {"price_sol": 1.0,  "days": 30},
-    "year":  {"price_sol": 10.0, "days": 365},
-    "life":  {"price_sol": 25.0, "days": None},
+    "week": {"price_sol": 0.5, "days": 7},
+    "month": {"price_sol": 1.0, "days": 30},
+    "year": {"price_sol": 10.0, "days": 365},
+    "life": {"price_sol": 25.0, "days": None},
 }
 
 DB = "subs.db"
 LAMPORTS_PER_SOL = 1_000_000_000
-TOLERANCE_LAMPORTS = int(0.05 * LAMPORTS_PER_SOL)  # 0.05 SOL
+TOLERANCE_LAMPORTS = int(0.05 * LAMPORTS_PER_SOL)  # 0.05 SOL tolerance
 
+# FastAPI app and Telegram application (webhook mode, no polling)
 api = FastAPI()
-
-# Build Telegram application (no polling)
 bot_app = ApplicationBuilder().token(BOT_TOKEN).build()
 
 # ===========================================================
 # DB HELPERS
 # ===========================================================
 
+
 def init_db():
     conn = sqlite3.connect(DB)
     c = conn.cursor()
 
-    c.execute("""
+    c.execute(
+        """
     CREATE TABLE IF NOT EXISTS subs (
         user_id     INTEGER PRIMARY KEY,
         username    TEXT,
@@ -57,16 +63,19 @@ def init_db():
         plan        TEXT,
         expires_at  INTEGER
     )
-    """)
+    """
+    )
 
-    c.execute("""
+    c.execute(
+        """
     CREATE TABLE IF NOT EXISTS pending (
         user_id          INTEGER PRIMARY KEY,
         wallet           TEXT,
         plan             TEXT,
         amount_lamports  INTEGER
     )
-    """)
+    """
+    )
 
     conn.commit()
     conn.close()
@@ -76,13 +85,16 @@ def init_db():
 def set_wallet(user_id: int, username: str | None, wallet: str):
     conn = sqlite3.connect(DB)
     c = conn.cursor()
-    c.execute("""
+    c.execute(
+        """
     INSERT INTO subs (user_id, username, wallet, plan, expires_at)
     VALUES (?, ?, ?, '', NULL)
     ON CONFLICT(user_id) DO UPDATE SET
         username = excluded.username,
         wallet   = excluded.wallet
-    """, (user_id, username or "", wallet))
+    """,
+        (user_id, username or "", wallet),
+    )
     conn.commit()
     conn.close()
     print(f"[DB] set_wallet user={user_id} wallet={wallet}")
@@ -103,17 +115,23 @@ def create_pending(user_id: int, wallet: str, plan: str):
 
     conn = sqlite3.connect(DB)
     c = conn.cursor()
-    c.execute("""
+    c.execute(
+        """
     INSERT INTO pending (user_id, wallet, plan, amount_lamports)
     VALUES (?, ?, ?, ?)
     ON CONFLICT(user_id) DO UPDATE SET
         wallet = excluded.wallet,
         plan   = excluded.plan,
         amount_lamports = excluded.amount_lamports
-    """, (user_id, wallet, plan, expected_lamports))
+    """,
+        (user_id, wallet, plan, expected_lamports),
+    )
     conn.commit()
     conn.close()
-    print(f"[DB] create_pending user={user_id} wallet={wallet} plan={plan} amount={expected_lamports}")
+    print(
+        f"[DB] create_pending user={user_id} wallet={wallet} "
+        f"plan={plan} amount={expected_lamports}"
+    )
 
 
 def complete_payment_from_transfer(from_wallet: str, amount_lamports: int):
@@ -124,11 +142,14 @@ def complete_payment_from_transfer(from_wallet: str, amount_lamports: int):
     conn = sqlite3.connect(DB)
     c = conn.cursor()
 
-    c.execute("""
+    c.execute(
+        """
     SELECT user_id, plan, amount_lamports
     FROM pending
     WHERE LOWER(wallet) = LOWER(?)
-    """, (from_wallet,))
+    """,
+        (from_wallet,),
+    )
     row = c.fetchone()
 
     if not row:
@@ -137,9 +158,12 @@ def complete_payment_from_transfer(from_wallet: str, amount_lamports: int):
         return None, None
 
     user_id, plan, expected = row
-    print(f"[PAY] candidate match user={user_id} plan={plan} expected={expected} got={amount_lamports}")
+    print(
+        f"[PAY] candidate match user={user_id} plan={plan} "
+        f"expected={expected} got={amount_lamports}"
+    )
 
-    # accept if sent >= expected - 0.05 SOL
+    # Accept if sent >= expected - 0.05 SOL (tolerance)
     if amount_lamports + TOLERANCE_LAMPORTS >= expected:
         c.execute("DELETE FROM pending WHERE user_id = ?", (user_id,))
 
@@ -149,18 +173,24 @@ def complete_payment_from_transfer(from_wallet: str, amount_lamports: int):
         else:
             expires = int(time.time()) + days * 86400
 
-        c.execute("""
+        c.execute(
+            """
         UPDATE subs
         SET plan = ?, expires_at = ?
         WHERE user_id = ?
-        """, (plan, expires, user_id))
+        """,
+            (plan, expires, user_id),
+        )
 
         conn.commit()
         conn.close()
         print(f"[PAY] ACCEPTED user={user_id} plan={plan} expires={expires}")
         return user_id, expires
     else:
-        print(f"[PAY] REJECTED underpay. expected>={expected - TOLERANCE_LAMPORTS}, got={amount_lamports}")
+        print(
+            f"[PAY] REJECTED underpay. "
+            f"expected>={expected - TOLERANCE_LAMPORTS}, got={amount_lamports}"
+        )
         conn.close()
         return None, None
 
@@ -169,10 +199,13 @@ def get_expired():
     now = int(time.time())
     conn = sqlite3.connect(DB)
     c = conn.cursor()
-    c.execute("""
+    c.execute(
+        """
     SELECT user_id FROM subs
     WHERE expires_at IS NOT NULL AND expires_at < ?
-    """, (now,))
+    """,
+        (now,),
+    )
     rows = [r[0] for r in c.fetchall()]
     conn.close()
     return rows
@@ -181,6 +214,7 @@ def get_expired():
 # ===========================================================
 # TELEGRAM HANDLERS
 # ===========================================================
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -192,6 +226,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown",
     )
 
+    # Keep username up-to-date
     conn = sqlite3.connect(DB)
     c = conn.cursor()
     c.execute(
@@ -215,6 +250,7 @@ async def setwallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     wallet = context.args[0].strip()
 
+    # Very simple length check, not full validation
     if len(wallet) < 32 or len(wallet) > 60:
         await update.message.reply_text("That doesn't look like a valid Solana address.")
         return
@@ -283,6 +319,7 @@ async def plan_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# Register Telegram handlers
 bot_app.add_handler(CommandHandler("start", start))
 bot_app.add_handler(CommandHandler("setwallet", setwallet))
 bot_app.add_handler(CommandHandler("subscribe", subscribe))
@@ -293,12 +330,14 @@ bot_app.add_handler(CallbackQueryHandler(plan_button))
 # JOB: KICK EXPIRED
 # ===========================================================
 
+
 async def kick_expired_job(context: ContextTypes.DEFAULT_TYPE):
     expired_users = get_expired()
     if expired_users:
         print(f"[JOB] kicking expired users: {expired_users}")
     for user_id in expired_users:
         try:
+            # Kick then unban so they can rejoin later by new link
             await context.bot.ban_chat_member(GROUP_ID, user_id)
             await context.bot.unban_chat_member(GROUP_ID, user_id)
         except Exception as e:
@@ -313,6 +352,7 @@ if bot_app.job_queue is not None:
 # FASTAPI: TELEGRAM WEBHOOK
 # ===========================================================
 
+
 @api.post("/telegram-webhook")
 async def telegram_webhook(request: Request):
     data = await request.json()
@@ -325,8 +365,10 @@ async def telegram_webhook(request: Request):
 # FASTAPI: HELIUS WEBHOOK
 # ===========================================================
 
+
 @api.post("/helius-webhook")
 async def helius(request: Request):
+    # Optional header auth (only if HELIUS_SECRET env var is set)
     if HELIUS_SECRET:
         if request.headers.get("x-webhook-secret") != HELIUS_SECRET:
             print("[WEBHOOK] invalid secret header")
@@ -335,9 +377,15 @@ async def helius(request: Request):
     body = await request.json()
     print("[WEBHOOK] incoming:", body)
 
-    txs = body.get("transactions", []) or body.get("events", [])
+    # Helius enhanced webhooks are currently sending a *list* of tx objects.
+    # If they ever change to an object with "transactions"/"events", handle that too.
+    if isinstance(body, list):
+        txs = body
+    else:
+        txs = body.get("transactions", []) or body.get("events", []) or []
 
     for tx in txs:
+        # nativeTransfers holds SOL transfers
         for nt in tx.get("nativeTransfers", []):
             to_acc = nt.get("toUserAccount")
             from_acc = nt.get("fromUserAccount")
@@ -354,11 +402,17 @@ async def helius(request: Request):
                 print(f"[WEBHOOK] bad amount {amount_raw}")
                 continue
 
-            print(f"[WEBHOOK] transfer to us from {from_acc} amount={amount_lamports}")
-            user_id, expires = complete_payment_from_transfer(from_acc, amount_lamports)
+            print(
+                f"[WEBHOOK] transfer to us from {from_acc} "
+                f"amount={amount_lamports}"
+            )
+            user_id, expires = complete_payment_from_transfer(
+                from_acc, amount_lamports
+            )
             if not user_id:
                 continue
 
+            # Send invite link
             try:
                 link = await bot_app.bot.create_chat_invite_link(GROUP_ID)
                 await bot_app.bot.send_message(
@@ -380,6 +434,7 @@ async def helius(request: Request):
 # FASTAPI LIFECYCLE: START/STOP TELEGRAM APP
 # ===========================================================
 
+
 @api.on_event("startup")
 async def on_startup():
     init_db()
@@ -398,6 +453,7 @@ async def on_shutdown():
 # ===========================================================
 # ENTRYPOINT
 # ===========================================================
+
 
 def main():
     uvicorn.run(api, host="0.0.0.0", port=8000)
